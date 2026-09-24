@@ -58,12 +58,15 @@ As tools que leem/gravam dados (`src/residencial_aurora/agents/tools.py`) nunca 
 - `src/residencial_aurora/storage/db.py`: o schema e o modo WAL são aplicados uma única vez, de forma síncrona, antes da primeira conexão — senão duas conexões simultâneas num banco recém-criado disputam o DDL e falham com `database is locked`, justamente na rajada concorrente. `CREATE UNIQUE INDEX idx_reservas_area_data_ativa ON reservas(area, data) WHERE status = 'ativa'`. É um índice único parcial do próprio SQLite — a exclusividade é garantida pelo motor do banco no instante do `INSERT`, não por uma checagem prévia em Python.
 - `src/residencial_aurora/storage/reservas.py` (`criar`): tenta o `INSERT` diretamente; se outra reserva ativa para a mesma área/data já existir (inclusive gravada por outra requisição no meio do caminho), o SQLite recusa com `IntegrityError`, que é convertido em `(None, False)` — uma resposta normal para a tool, nunca uma exceção não tratada ou um `5xx`.
 - Testado diretamente na camada de armazenamento (`tests/test_storage.py`) com seis gravações concorrentes reais (`asyncio.gather`) para a mesma área/data: exatamente uma tem sucesso, as outras recebem `False` sem erro.
+- Testado também pela API (`tests/test_fluxo_confirmacao.py`): duas sessões de apartamentos diferentes pedem o salão na mesma data e as duas aprovações são enviadas ao mesmo tempo; as duas respondem `200` e só uma reserva é gravada.
+- Regra de negócio 5: o código (`RSV-` + 8 caracteres aleatórios) é a chave primária da tabela, e reservas canceladas continuam nela com `status = 'cancelada'`. Se um código sorteado já existir, o SQLite recusa o `INSERT` e `criar` tenta de novo com outro código — só a colisão de área/data é tratada como "já reservada".
 
 ## Como rodar
 
 ### Pré-requisitos
 
 - Python 3.12+
+- Google ADK `2.9.2` (versão exata fixada no `pyproject.toml` e no `uv.lock`; instalada pelo `uv sync`)
 - [uv](https://docs.astral.sh/uv/)
 - Uma chave de API do Google AI Studio (Gemini)
 
@@ -105,7 +108,7 @@ A API responde em `http://localhost:8000`, com as rotas do contrato do enunciado
 uv run pytest
 ```
 
-Os testes usam bancos SQLite temporários (não tocam em `data/`) e não chamam o Gemini: cobrem concorrência de reservas, isolamento por apartamento, a busca no regulamento, o agrupamento de confirmações pendentes e as rotas HTTP (`404`/`409`/`429`).
+Os testes usam bancos SQLite temporários (não tocam em `data/`) e não chamam o Gemini: cobrem concorrência de reservas, isolamento por apartamento, códigos que não se repetem, a busca no regulamento, o agrupamento de confirmações pendentes e as rotas HTTP (`404`/`409`/`429`). `tests/test_fluxo_confirmacao.py` usa os agentes, o Runner e a sessão em SQLite de verdade, trocando só o modelo por um roteirizado, para conferir negar/aprovar/`409`, a aprovação depois de reiniciar a API e as duas aprovações simultâneas do passo 14.
 
 ## Validação com o Gemini real
 
