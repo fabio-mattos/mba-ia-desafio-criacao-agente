@@ -12,13 +12,18 @@ Um agente principal (`orquestrador_principal`) e três especialistas, todos defi
 | Agente | Responsabilidade | Como é acionado |
 |---|---|---|
 | `orquestrador_principal` | Recebe toda mensagem do morador, não executa nenhuma ação sozinho, só decide para qual especialista transferir a conversa. | Agente raiz do `App`/`Runner`. |
-| `especialista_reservas` | Lista áreas comuns, consulta disponibilidade, reserva e cancela reservas do apartamento da sessão. | `sub_agent` do principal; o ADK expõe `transfer_to_agent` automaticamente para os sub-agentes de um `LlmAgent`. |
+| `especialista_reservas` | Lista áreas comuns, consulta disponibilidade, reserva e cancela reservas do apartamento da sessão. | `sub_agent` do principal; o ADK expõe `transfer_to_agent` automaticamente entre pai, filhos e irmãos. |
 | `especialista_visitantes` | Lista e autoriza visitantes do apartamento da sessão. | Idem. |
 | `especialista_regulamento` | Responde dúvidas sobre o regulamento interno, sempre via a tool `consultar_regulamento`. | Idem. |
 
 **Por que essa divisão:** cada especialista tem um conjunto de tools e um domínio de dados isolado (reservas, visitantes, regulamento), o que deixa o `instruction` de cada um curto e focado — e é exatamente essa separação que permite tirar o regulamento do agente principal (Garantia 4) sem tirá-lo do assistente como um todo.
 
-**Como a transferência funciona entre eles:** por padrão, um `LlmAgent` com `sub_agents` pode transferir para os próprios sub-agentes, para o pai e para os "irmãos" (`disallow_transfer_to_parent`/`disallow_transfer_to_peers` = `False`, o padrão — ver `google/adk/flows/llm_flows/agent_transfer.py`). Isso é usado nas instructions: cada especialista é instruído a transferir direto para o especialista certo se a pergunta mudar de assunto, e a transferir de volta para `orquestrador_principal` ao concluir o atendimento, para que o próximo assunto não fique preso no especialista errado.
+**Como a transferência funciona entre eles:** padrão do ADK — cada especialista pode transferir para os "irmãos" e para o pai (`disallow_transfer_to_parent`/`disallow_transfer_to_peers` = `False`), e continua sendo o agente ativo da sessão depois de responder (`google/adk/agents/_agent_router.py:find_agent_to_run`). Se a próxima mensagem for de outro assunto, ele transfere direto para o especialista certo.
+
+Duas decisões vieram de teste real com o Gemini:
+
+- **Especialistas não "transferem de volta ao concluir".** Com essa instrução, especialista e orquestrador ficavam passando a conversa um para o outro em loop, sem responder ao morador. Agora eles sempre terminam respondendo e só transferem quando o assunto muda.
+- **Não usamos `disallow_transfer_to_parent=True`** (a topologia "em estrela", que evitaria o loop por construção). Com ela, uma mensagem de texto enviada enquanto há confirmação pendente encerra o especialista, e o `Runner` deixa de retomar a invocação quando a confirmação chega — a ação confirmada simplesmente não executa, sem erro (`google/adk/runners.py`, checagem de `end_of_agents` ao retomar).
 
 As tools que leem/gravam dados (`src/residencial_aurora/agents/tools.py`) nunca guardam nem inventam estado: elas sempre chamam a camada de armazenamento (`src/residencial_aurora/storage/`), que é quem fala com o SQLite. O modelo nunca vê nem decide um `codigo` de reserva, um `apartamento` ou o conteúdo do regulamento por conta própria.
 
@@ -28,7 +33,7 @@ As tools que leem/gravam dados (`src/residencial_aurora/agents/tools.py`) nunca 
 
 - `src/residencial_aurora/agents/especialistas.py`: as tools `reservar_area` e `autorizar_visitante` são registradas com `FunctionTool(..., require_confirmation=...)` — a segunda com `True` (autorizar visitante sempre libera acesso), a primeira com o callable `tools._reserva_precisa_confirmacao` (só quando `area.taxa > 0`, regra de negócio 2).
 - `src/residencial_aurora/agents/tools.py`: o corpo de `reservar_area`/`autorizar_visitante` só grava dados quando chega a ser executado — e o próprio ADK (`FunctionTool.run_async`, biblioteca) só invoca o corpo da função depois que `tool_context.tool_confirmation.confirmed` é `True`. Antes disso, ele pausa a invocação e devolve um `FunctionCall` `adk_request_confirmation`; nenhuma linha nossa decide "posso executar ou não" — quem decide é o próprio framework, com base na confirmação recebida pela rota.
-- `src/residencial_aurora/confirmacoes.py` (`listar_pendentes`): lê o histórico de eventos da sessão (a mesma fonte de `GET /sessoes/{id}/eventos`) e considera pendente toda chamada `adk_request_confirmation` sem uma resposta correspondente. Isso é o que preenche `confirmacoes_pendentes` na resposta.
+- `src/residencial_aurora/confirmacoes.py` (`listar_pendentes`): lê o histórico de eventos da sessão (a mesma fonte de `GET /sessoes/{id}/eventos`) e considera pendente toda chamada `adk_request_confirmation` sem uma resposta correspondente. Isso é o que preenche `confirmacoes_pendentes` na resposta. Se o modelo repetir o mesmo pedido (por exemplo, quando o morador escreve "já confirmei" no chat), os pedidos idênticos — mesma ação e mesmos argumentos — aparecem como uma única pendência, e responder qualquer um deles resolve todos.
 - `src/residencial_aurora/api.py` (`responder_confirmacao`): antes de repassar qualquer coisa ao Runner, confere se o `id` recebido está em `listar_pendentes(session)`; se não estiver — porque nunca existiu ou porque já foi respondido — devolve `409` sem tocar em nada. A confirmação em si nunca vem do texto da conversa: ela é sempre um `FunctionResponse` estruturado montado pela API, nunca algo que o modelo escreve.
 
 ### 2 — Cada sessão pertence a um apartamento
@@ -74,7 +79,9 @@ Variáveis do `.env`:
 
 - `GOOGLE_API_KEY`: chave do Google AI Studio.
 - `GOOGLE_GENAI_USE_VERTEXAI`: `FALSE` para usar a API do Google AI Studio (padrão do curso), não o Vertex AI.
-- `GEMINI_MODEL`: modelo usado por todos os agentes (padrão `gemini-2.5-flash`; ajuste conforme os limites do seu projeto).
+- `GEMINI_MODEL`: modelo usado por todos os agentes (padrão `gemini-3.6-flash`; o `gemini-2.5-flash` não está mais disponível para chaves novas).
+
+**Cota do plano gratuito:** o Google AI Studio gratuito limita poucas requisições por minuto por modelo (5/min no `gemini-3.6-flash` quando isto foi testado), e cada mensagem do morador faz de 2 a 4 chamadas ao modelo (orquestrador + especialista + tools). Quando a cota estoura, a API devolve `429` com uma mensagem clara (em vez de `500`); se o Google estiver sobrecarregado, `503` — é só aguardar alguns segundos e reenviar. Para testar com mais folga, `GEMINI_MODEL=gemini-3.5-flash-lite` tem cota maior, com respostas um pouco mais pobres.
 
 ### Restaurar os dados iniciais
 
@@ -98,7 +105,7 @@ A API responde em `http://localhost:8000`, com as rotas do contrato do enunciado
 uv run pytest
 ```
 
-Os testes usam bancos SQLite temporários (não tocam em `data/`) e não chamam o Gemini: cobrem concorrência de reservas, isolamento por apartamento, a busca no regulamento e as rotas HTTP (`404`/`409`).
+Os testes usam bancos SQLite temporários (não tocam em `data/`) e não chamam o Gemini: cobrem concorrência de reservas, isolamento por apartamento, a busca no regulamento, o agrupamento de confirmações pendentes e as rotas HTTP (`404`/`409`/`429`).
 
 ## Limitações conhecidas
 

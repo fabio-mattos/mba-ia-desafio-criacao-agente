@@ -8,3 +8,4 @@ data/
 *.db-shm
 
 .pytest_cache/
+uvicorn.log
