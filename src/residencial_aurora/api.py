@@ -10,11 +10,17 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
+from google.genai import errors as genai_errors
 from google.genai import types
 from pydantic import BaseModel
 
-from .confirmacoes import CONFIRMATION_FUNCTION_CALL_NAME, listar_pendentes
+from .confirmacoes import (
+    CONFIRMATION_FUNCTION_CALL_NAME,
+    esta_pendente,
+    listar_pendentes,
+)
 from .config import APP_NAME
 from .events_json import evento_para_json
 from .runtime import obter_runner, obter_session_service
@@ -23,6 +29,26 @@ from .storage import sessoes as sessoes_store
 from .storage import visitantes as visitantes_store
 
 app = FastAPI(title="Residencial Aurora")
+
+
+@app.exception_handler(genai_errors.APIError)
+async def _erro_do_modelo(request: Request, exc: genai_errors.APIError) -> JSONResponse:
+    # Cota estourada (comum no plano gratuito) ou modelo sobrecarregado nao sao
+    # erros da API: devolve 429/503 para o cliente tentar de novo, em vez de 500.
+    if exc.code == 429:
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Limite de requisicoes do modelo atingido. Tente novamente em instantes."},
+        )
+    if exc.code == 503:
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "O modelo esta sobrecarregado no momento. Tente novamente em instantes."},
+        )
+    return JSONResponse(
+        status_code=502,
+        content={"detail": f"Erro ao chamar o modelo: {exc.status or exc.code}."},
+    )
 
 
 class CriarSessaoRequest(BaseModel):
@@ -78,6 +104,17 @@ async def _executar_turno(session_id: str, apartamento: str, mensagem: types.Con
         app_name=APP_NAME, user_id=apartamento, session_id=session_id
     )
     pendentes = listar_pendentes(session)
+    pediu_confirmacao = any(
+        fc.name == CONFIRMATION_FUNCTION_CALL_NAME
+        for evento in eventos
+        for fc in evento.get_function_calls()
+    )
+    if not resposta and pediu_confirmacao:
+        # O ADK pausa o turno no pedido de confirmacao, as vezes sem texto do modelo.
+        resposta = (
+            "Essa acao precisa da sua confirmacao antes de ser concluida."
+            " Veja as confirmacoes pendentes."
+        )
     return RespostaConversa(resposta=resposta, confirmacoes_pendentes=pendentes)
 
 
@@ -110,8 +147,7 @@ async def responder_confirmacao(session_id: str, body: ConfirmacaoRequest) -> An
     if session is None:
         raise HTTPException(status_code=404, detail="Sessao nao encontrada.")
 
-    pendentes_ids = {p["id"] for p in listar_pendentes(session)}
-    if body.id not in pendentes_ids:
+    if not esta_pendente(session, body.id):
         raise HTTPException(
             status_code=409,
             detail="Nao ha confirmacao pendente com esse id nesta sessao.",

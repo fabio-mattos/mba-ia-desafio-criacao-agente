@@ -12,6 +12,8 @@ executar nada.
 
 from __future__ import annotations
 
+import json
+
 from google.adk.sessions.session import Session
 
 CONFIRMATION_FUNCTION_CALL_NAME = "adk_request_confirmation"
@@ -22,8 +24,9 @@ _ACAO_POR_TOOL = {
 }
 
 
-def listar_pendentes(session: Session) -> list[dict]:
-    pedidos: dict[str, dict] = {}
+def _pedidos_sem_resposta(session: Session) -> list[tuple[str, dict]]:
+    """Todos os pedidos de confirmacao sem resposta, em ordem: (chave, pedido)."""
+    pedidos: dict[str, tuple[str, dict]] = {}
     respondidos: set[str] = set()
 
     for event in session.events:
@@ -32,17 +35,44 @@ def listar_pendentes(session: Session) -> list[dict]:
                 continue
             original = (fc.args or {}).get("originalFunctionCall") or {}
             nome_tool = original.get("name", "")
-            pedidos[fc.id] = {
-                "id": fc.id,
-                "acao": _ACAO_POR_TOOL.get(nome_tool, nome_tool),
-                "detalhes": original.get("args") or {},
-            }
+            detalhes = original.get("args") or {}
+            chave = json.dumps([nome_tool, detalhes], sort_keys=True)
+            pedidos[fc.id] = (
+                chave,
+                {
+                    "id": fc.id,
+                    "acao": _ACAO_POR_TOOL.get(nome_tool, nome_tool),
+                    "detalhes": detalhes,
+                },
+            )
         for fr in event.get_function_responses():
             if fr.name == CONFIRMATION_FUNCTION_CALL_NAME and fr.id:
                 respondidos.add(fr.id)
+                # Respondeu um pedido: os pedidos identicos anteriores
+                # (mesma acao e mesmos argumentos) ficam resolvidos junto.
+                if fr.id in pedidos:
+                    chave = pedidos[fr.id][0]
+                    respondidos.update(
+                        i for i, (c, _) in pedidos.items() if c == chave
+                    )
 
-    return [p for fc_id, p in pedidos.items() if fc_id not in respondidos]
+    return [(c, p) for i, (c, p) in pedidos.items() if i not in respondidos]
+
+
+def listar_pendentes(session: Session) -> list[dict]:
+    """Pendencias para mostrar ao morador, sem repetir a mesma acao.
+
+    O modelo as vezes chama a mesma tool de novo (por exemplo, quando o
+    morador escreve "ja confirmei"), gerando um segundo pedido identico. So o
+    mais recente de cada acao+argumentos aparece; o id de um pedido anterior
+    identico continua aceito pela rota (ver `esta_pendente`).
+    """
+    por_chave: dict[str, dict] = {}
+    for chave, pedido in _pedidos_sem_resposta(session):
+        por_chave.pop(chave, None)
+        por_chave[chave] = pedido
+    return list(por_chave.values())
 
 
 def esta_pendente(session: Session, confirmacao_id: str) -> bool:
-    return any(p["id"] == confirmacao_id for p in listar_pendentes(session))
+    return any(p["id"] == confirmacao_id for _, p in _pedidos_sem_resposta(session))
