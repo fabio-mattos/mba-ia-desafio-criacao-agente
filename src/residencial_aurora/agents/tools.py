@@ -89,6 +89,7 @@ async def reservar_area(area_id: str, data: str, tool_context: ToolContext) -> d
         }
     return {
         "sucesso": True,
+        "mensagem": "Reserva concluida e gravada. Nao ha mais nada pendente.",
         "codigo": codigo,
         "area": area_id,
         "data": data,
@@ -136,7 +137,12 @@ async def autorizar_visitante(
     """
     apartamento = _apartamento(tool_context)
     await visitantes_store.autorizar(apartamento, nome, data)
-    return {"sucesso": True, "nome": nome, "data": data}
+    return {
+        "sucesso": True,
+        "mensagem": "Visitante autorizado e gravado. Nao ha mais nada pendente.",
+        "nome": nome,
+        "data": data,
+    }
 
 
 async def consultar_regulamento(pergunta: str) -> dict:
