@@ -43,20 +43,31 @@ async def listar_ativas_por_apartamento(apartamento: str) -> list[dict]:
         return [dict(row) for row in rows]
 
 
-async def criar(apartamento: str, area_id: str, data: str) -> tuple[str | None, bool]:
-    """Tenta gravar uma nova reserva. Retorna (codigo, sucesso)."""
-    codigo = _gerar_codigo()
-    try:
-        async with conectar() as db:
-            await db.execute(
-                "INSERT INTO reservas (codigo, apartamento, area, data, status, criada_em)"
-                " VALUES (?, ?, ?, ?, 'ativa', ?)",
-                (codigo, apartamento, area_id, data, time.time()),
-            )
-            await db.commit()
-        return codigo, True
-    except aiosqlite.IntegrityError:
-        return None, False
+async def criar(
+    apartamento: str, area_id: str, data: str, gerar_codigo=_gerar_codigo
+) -> tuple[str | None, bool]:
+    """Tenta gravar uma nova reserva. Retorna (codigo, sucesso).
+
+    O codigo e a chave primaria da tabela, e reservas canceladas continuam
+    nela: um codigo repetido (regra de negocio 5) e recusado pelo SQLite como
+    qualquer outro, e nesse caso a gravacao e refeita com um codigo novo --
+    so a colisao de area/data e que significa "ja reservada".
+    """
+    while True:
+        codigo = gerar_codigo()
+        try:
+            async with conectar() as db:
+                await db.execute(
+                    "INSERT INTO reservas (codigo, apartamento, area, data, status, criada_em)"
+                    " VALUES (?, ?, ?, ?, 'ativa', ?)",
+                    (codigo, apartamento, area_id, data, time.time()),
+                )
+                await db.commit()
+            return codigo, True
+        except aiosqlite.IntegrityError as exc:
+            if "reservas.codigo" in str(exc):
+                continue
+            return None, False
 
 
 async def cancelar_por_area_data(

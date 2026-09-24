@@ -44,3 +44,15 @@ async def test_visitantes_isolados_por_apartamento():
     assert await visitantes.listar_por_apartamento("101") == [
         {"nome": "Ana", "data": "2030-05-05"}
     ]
+
+
+async def test_codigo_repetido_gera_outro_codigo_em_vez_de_recusar():
+    await reservas.semear(
+        [{"codigo": "RSV-1377", "apartamento": "101", "area": "quadra", "data": "2030-03-09"}]
+    )
+    await reservas.cancelar_por_codigo("101", "RSV-1377")
+    codigos = iter(["RSV-1377", "RSV-NOVO"])
+    codigo, ok = await reservas.criar(
+        "202", "churrasqueira", "2030-05-06", gerar_codigo=lambda: next(codigos)
+    )
+    assert ok and codigo == "RSV-NOVO"
