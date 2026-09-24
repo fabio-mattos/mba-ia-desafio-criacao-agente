@@ -25,4 +25,4 @@ RESERVAS_JSON = DADOS_DIR / "reservas.json"
 VISITANTES_JSON = DADOS_DIR / "visitantes.json"
 REGULAMENTO_MD = DADOS_DIR / "regulamento.md"
 
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
