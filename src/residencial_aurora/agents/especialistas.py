@@ -4,12 +4,18 @@ Nenhum agente recebe o regulamento no `instruction` (Garantia 4): o
 especialista de regulamento so tem acesso a ele atraves da tool
 `consultar_regulamento`, que devolve um unico capitulo por pergunta.
 
-Por padrao, um LlmAgent com sub_agents pode transferir para seus sub_agents,
-para o proprio pai e para seus "irmaos" (ver
-`google.adk.flows.llm_flows.agent_transfer._get_transfer_targets`). Isso e o
-que permite, por exemplo, o especialista de reservas perceber que uma
-pergunta e sobre o regulamento e transferir direto para o especialista de
-regulamento, sem precisar voltar ao principal primeiro.
+Transferencias: padrao do ADK. Cada especialista pode transferir para os
+"irmaos" e para o orquestrador, e continua sendo o agente ativo da sessao
+depois de responder (`google.adk.agents._agent_router.find_agent_to_run`).
+Os especialistas NAO sao instruidos a "transferir de volta ao concluir": em
+teste real com o Gemini, isso fazia especialista e orquestrador passarem a
+conversa um para o outro em loop, sem responder ao morador. Eles respondem, e
+so transferem quando a proxima pergunta for de outro assunto.
+
+Tambem nao usamos `disallow_transfer_to_parent`: com ele, uma mensagem de
+texto enviada enquanto ha confirmacao pendente encerra o especialista, e o
+Runner deixa de retomar a invocacao quando a confirmacao chega (a acao
+confirmada nunca executa -- ver `Runner._run_node_async`, `end_of_agents`).
 """
 
 from __future__ import annotations
@@ -35,12 +41,14 @@ especialista_reservas = Agent(
         " area com taxa pode ficar pendente de confirmacao do morador: isso e"
         " controlado pelo sistema, entao se a tool disser que a confirmacao"
         " esta pendente, apenas informe o morador que a confirmacao foi"
-        " solicitada e aguarde, mesmo que ele diga que ja confirmou. Cancelar"
-        " reserva nunca precisa de confirmacao. Se a duvida do morador for"
-        " sobre o regulamento ou sobre visitantes, transfira imediatamente"
-        " para o especialista certo (especialista_regulamento ou"
-        " especialista_visitantes). Depois de concluir seu atendimento,"
-        " transfira de volta para orquestrador_principal."
+        " solicitada e aguarde, mesmo que ele diga que ja confirmou. Nunca"
+        " chame reservar_area de novo para a mesma area e data enquanto a"
+        " confirmacao anterior estiver pendente. Cancelar"
+        " reserva nunca precisa de confirmacao. Sempre termine respondendo ao"
+        " morador em portugues, com o resultado das tools; nunca transfira"
+        " so porque terminou. Se a mensagem do morador for sobre regulamento"
+        " ou visitantes, transfira para especialista_regulamento ou"
+        " especialista_visitantes."
     ),
     tools=[
         FunctionTool(tools.listar_areas_comuns),
@@ -67,11 +75,12 @@ especialista_visitantes = Agent(
         " sempre fica pendente de confirmacao do morador pela rota de"
         " confirmacoes, mesmo que o morador diga que ja confirmou ou peca"
         " para liberar direto: nunca prometa que o acesso foi liberado antes"
-        " da tool confirmar isso. Se a duvida do morador for sobre reservas"
-        " de areas comuns ou sobre o regulamento, transfira imediatamente"
-        " para o especialista certo (especialista_reservas ou"
-        " especialista_regulamento). Depois de concluir seu atendimento,"
-        " transfira de volta para orquestrador_principal."
+        " da tool confirmar isso. Nunca chame autorizar_visitante de novo"
+        " para o mesmo visitante enquanto a confirmacao anterior estiver"
+        " pendente. Sempre termine respondendo ao morador em portugues,"
+        " com o resultado das tools; nunca transfira so porque terminou. Se"
+        " a mensagem do morador for sobre reservas ou regulamento, transfira"
+        " para especialista_reservas ou especialista_regulamento."
     ),
     tools=[
         FunctionTool(tools.listar_meus_visitantes),
@@ -92,11 +101,10 @@ especialista_regulamento = Agent(
         " regras do condominio, use a tool consultar_regulamento e baseie sua"
         " resposta apenas no trecho que ela devolver. Se o trecho nao"
         " responder a pergunta, diga que nao encontrou essa informacao no"
-        " regulamento, sem inventar. Se a duvida do morador for sobre"
-        " reservar areas ou sobre visitantes, transfira imediatamente para o"
-        " especialista certo (especialista_reservas ou"
-        " especialista_visitantes). Depois de responder, transfira de volta"
-        " para orquestrador_principal."
+        " regulamento, sem inventar. Sempre termine respondendo ao morador em"
+        " portugues; nunca transfira so porque terminou. Se a mensagem do"
+        " morador for sobre reservas ou visitantes, transfira para"
+        " especialista_reservas ou especialista_visitantes."
     ),
     tools=[FunctionTool(tools.consultar_regulamento)],
 )
