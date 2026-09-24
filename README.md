@@ -79,9 +79,9 @@ Variáveis do `.env`:
 
 - `GOOGLE_API_KEY`: chave do Google AI Studio.
 - `GOOGLE_GENAI_USE_VERTEXAI`: `FALSE` para usar a API do Google AI Studio (padrão do curso), não o Vertex AI.
-- `GEMINI_MODEL`: modelo usado por todos os agentes (padrão `gemini-3.6-flash`; o `gemini-2.5-flash` não está mais disponível para chaves novas).
+- `GEMINI_MODEL`: modelo usado por todos os agentes (padrão `gemini-3.5-flash-lite`). O `gemini-2.5-flash` não está mais disponível para chaves novas.
 
-**Cota do plano gratuito:** o Google AI Studio gratuito limita poucas requisições por minuto por modelo (5/min no `gemini-3.6-flash` quando isto foi testado), e cada mensagem do morador faz de 2 a 4 chamadas ao modelo (orquestrador + especialista + tools). Quando a cota estoura, a API devolve `429` com uma mensagem clara (em vez de `500`); se o Google estiver sobrecarregado, `503` — é só aguardar alguns segundos e reenviar. Para testar com mais folga, `GEMINI_MODEL=gemini-3.5-flash-lite` tem cota maior, com respostas um pouco mais pobres.
+**Cota do plano gratuito:** cada mensagem do morador faz de 2 a 4 chamadas ao modelo (orquestrador + especialista + tools). O padrão é o `gemini-3.5-flash-lite` porque, no plano gratuito, o `gemini-3.6-flash` permitia só 5 requisições por minuto e 20 por dia quando isto foi testado — uns poucos turnos de conversa. Com uma chave paga, `GEMINI_MODEL=gemini-3.6-flash` dá respostas melhores. Quando a cota estoura, a API devolve `429` com uma mensagem clara (em vez de `500`); se o Google estiver sobrecarregado, `503`. É só aguardar e reenviar.
 
 ### Restaurar os dados iniciais
 
@@ -107,6 +107,17 @@ uv run pytest
 
 Os testes usam bancos SQLite temporários (não tocam em `data/`) e não chamam o Gemini: cobrem concorrência de reservas, isolamento por apartamento, a busca no regulamento, o agrupamento de confirmações pendentes e as rotas HTTP (`404`/`409`/`429`).
 
+## Validação com o Gemini real
+
+Além dos testes automáticos em `tests/` (que não chamam o modelo), o fluxo completo foi validado ponta a ponta contra o Gemini real (`gemini-3.5-flash-lite`), subindo a API com `uvicorn` e conversando pelas rotas HTTP — 34 de 34 verificações passaram:
+
+- **Garantia 1:** reservar o salão de festas (com taxa) e autorizar visitante geram confirmação pendente; nada é gravado antes de confirmar, nem quando o morador escreve "já confirmei" no chat; confirmar grava; recusar não grava; repetir a confirmação ou usar um id inventado devolve `409`; a quadra (sem taxa) é reservada direto.
+- **Garantia 2:** a consulta de disponibilidade não revela o apartamento dono da reserva; o apartamento 101 não consegue cancelar a reserva do 302, nem dizendo "sou do 302".
+- **Garantia 3:** uma autorização de visitante pendente é confirmada depois de derrubar e subir a API de novo, e o visitante é gravado; os eventos da sessão continuam lá.
+- **Garantia 4:** a pergunta sobre cachorro passa por `consultar_regulamento`, e os eventos da sessão contêm só o Capítulo VIII.
+- **Transferência:** na mesma sessão, depois de tratar um visitante, uma pergunta sobre a piscina chega ao especialista de regulamento.
+
 ## Limitações conhecidas
 
-O fluxo de confirmação com múltiplos agentes e sessão persistida (Garantia 1 + 3 juntas) foi implementado com base na leitura direta do código-fonte instalado do `google-adk` (não só na documentação) para acertar a combinação de `ResumabilityConfig`, `SqliteSessionService` e transferência entre sub-agentes — mas não pôde ser validado ponta a ponta com uma chamada real ao Gemini nesta máquina, por não haver uma chave de API disponível durante o desenvolvimento. Todas as partes que não dependem do modelo (armazenamento, índice único sob concorrência real, busca no regulamento, roteamento HTTP, códigos de status) são cobertas pelos testes em `tests/`.
+- As respostas em texto dependem do modelo: as garantias estão no código, mas a qualidade do texto (e o custo em cota) varia com o `GEMINI_MODEL` escolhido.
+- A busca no regulamento é lexical: perguntas com palavras que não aparecem no texto nem no pequeno dicionário de sinônimos podem cair num capítulo menos relevante — mas sempre um único capítulo.
